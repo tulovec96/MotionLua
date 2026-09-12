@@ -6,10 +6,14 @@ export function RobloxSignInButton({
   size = "default",
   className,
   callbackUrl,
+  label = "Sign in with Roblox",
+  showMark = true,
 }: {
   size?: "default" | "sm" | "lg";
   className?: string;
   callbackUrl?: string;
+  label?: string;
+  showMark?: boolean;
 }) {
   return (
     <form action={signInWithRoblox}>
@@ -22,8 +26,8 @@ export function RobloxSignInButton({
           className
         )}
       >
-        <RobloxMark className="size-4" />
-        Sign in with Roblox
+        {showMark ? <RobloxMark className="size-4" /> : null}
+        {label}
       </Button>
     </form>
   );
