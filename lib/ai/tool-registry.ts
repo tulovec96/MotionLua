@@ -1,14 +1,29 @@
 import { tool, type Tool } from "ai";
 import { z } from "zod";
+import { getRequestContext } from "@/lib/ai/request-context";
+import { sendBridgeCommand } from "@/lib/bridge/client";
+import { searchCatalog, getCatalogItemDetails } from "@/lib/marketplace/catalog-client";
+import { mockSearchAudio } from "@/lib/marketplace/mock-catalog";
 
-// The full Roblox Studio tool surface. Every execute() here is a MOCK for
-// this phase — deterministic, dependency-free fixtures — so the chat UI's
-// streaming trace can be built and demoed without a paired Studio plugin. A
-// later phase swaps these bodies for real calls through lib/bridge/client.ts
-// while keeping this exact name/schema contract, so the in-app chat, the MCP
-// server, and the plugin dispatcher never diverge on what a tool call means.
+// The full Roblox Studio tool surface. Every tool tries the paired Studio
+// plugin first (via lib/bridge/client.ts, routed through the current
+// request's userId from lib/ai/request-context.ts) and falls back to a
+// deterministic mock when there's no live connection — so the chat, the
+// MCP server (lib/mcp/tools), and the plugin dispatcher all share this one
+// name/schema/behavior contract, and the trace UI stays fully demoable
+// without a paired plugin.
 
 const path = () => z.string().describe("Instance path, e.g. ServerScriptService/InventoryModule");
+
+/** Tries the bridge; falls back to `mock()` when unpaired, disconnected, or the plugin reports failure. */
+async function viaBridgeOrMock<T>(type: string, input: unknown, mock: () => Promise<T> | T): Promise<T> {
+  const ctx = getRequestContext();
+  if (ctx) {
+    const bridged = await sendBridgeCommand<T>(ctx.userId, type, input);
+    if (bridged.ok) return bridged.result;
+  }
+  return mock();
+}
 
 // ---------------------------------------------------------------------------
 // Read tools
@@ -17,26 +32,30 @@ const path = () => z.string().describe("Instance path, e.g. ServerScriptService/
 const get_file_tree = tool({
   description: "List the Script/ModuleScript/Instance tree under a given root path (or the whole place).",
   inputSchema: z.object({ root: z.string().optional().describe("Root path; omit for the whole place") }),
-  async execute({ root }) {
-    const base = root ?? "game";
-    return {
-      root: base,
-      tree: [
-        { path: `${base}/ServerScriptService/InventoryModule`, className: "ModuleScript" },
-        { path: `${base}/ServerScriptService/PlayerController`, className: "Script" },
-        { path: `${base}/ReplicatedStorage/RemoteEvents`, className: "Folder" },
-        { path: `${base}/StarterGui/MainHud`, className: "ScreenGui" },
-      ],
-    };
+  async execute(input) {
+    return viaBridgeOrMock("get_file_tree", input, () => {
+      const base = input.root ?? "game";
+      return {
+        root: base,
+        tree: [
+          { path: `${base}/ServerScriptService/InventoryModule`, className: "ModuleScript" },
+          { path: `${base}/ServerScriptService/PlayerController`, className: "Script" },
+          { path: `${base}/ReplicatedStorage/RemoteEvents`, className: "Folder" },
+          { path: `${base}/StarterGui/MainHud`, className: "ScreenGui" },
+        ],
+      };
+    });
   },
 });
 
 const read_script = tool({
   description: "Read the full source of a Script or ModuleScript.",
   inputSchema: z.object({ path: path() }),
-  async execute({ path }) {
-    const content = MOCK_FILES[path] ?? MOCK_FILES.default;
-    return { path, content, lines: content.split("\n").length };
+  async execute(input) {
+    return viaBridgeOrMock("read_script", input, () => {
+      const content = MOCK_FILES[input.path] ?? MOCK_FILES.default;
+      return { path: input.path, content, lines: content.split("\n").length };
+    });
   },
 });
 
@@ -46,33 +65,35 @@ const search_instances = tool({
     query: z.string(),
     className: z.string().optional(),
   }),
-  async execute({ query, className }) {
-    return {
-      query,
+  async execute(input) {
+    return viaBridgeOrMock("search_instances", input, () => ({
+      query: input.query,
       results: [
-        { path: `game/Workspace/${query}`, className: className ?? "Model" },
-        { path: `game/ServerScriptService/${query}Handler`, className: "Script" },
+        { path: `game/Workspace/${input.query}`, className: input.className ?? "Model" },
+        { path: `game/ServerScriptService/${input.query}Handler`, className: "Script" },
       ],
-    };
+    }));
   },
 });
 
 const get_selection = tool({
   description: "Get the instances currently selected in Roblox Studio.",
   inputSchema: z.object({}),
-  async execute() {
-    return { selection: [{ path: "game/Workspace/Baseplate", className: "Part" }] };
+  async execute(input) {
+    return viaBridgeOrMock("get_selection", input, () => ({
+      selection: [{ path: "game/Workspace/Baseplate", className: "Part" }],
+    }));
   },
 });
 
 const get_properties = tool({
   description: "Read the properties of a single instance.",
   inputSchema: z.object({ path: path() }),
-  async execute({ path }) {
-    return {
-      path,
-      properties: { Name: path.split("/").pop() ?? path, Anchored: "true", CanCollide: "true" },
-    };
+  async execute(input) {
+    return viaBridgeOrMock("get_properties", input, () => ({
+      path: input.path,
+      properties: { Name: input.path.split("/").pop() ?? input.path, Anchored: "true", CanCollide: "true" },
+    }));
   },
 });
 
@@ -88,9 +109,11 @@ const write_script = tool({
     content: z.string().describe("Full new file content"),
     summary: z.string().describe("One-line, past-tense description of the change"),
   }),
-  async execute({ path, content, summary }) {
-    const before = MOCK_FILES[path] ?? "";
-    return { path, before, after: content, summary };
+  async execute(input) {
+    return viaBridgeOrMock("write_script", input, () => {
+      const before = MOCK_FILES[input.path] ?? "";
+      return { path: input.path, before, after: input.content, summary: input.summary };
+    });
   },
 });
 
@@ -101,8 +124,11 @@ const create_instance = tool({
     parent: path(),
     name: z.string(),
   }),
-  async execute({ className, parent, name }) {
-    return { path: `${parent}/${name}`, className };
+  async execute(input) {
+    return viaBridgeOrMock("create_instance", input, () => ({
+      path: `${input.parent}/${input.name}`,
+      className: input.className,
+    }));
   },
 });
 
@@ -112,26 +138,31 @@ const set_properties = tool({
     path: path(),
     properties: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
   }),
-  async execute({ path, properties }) {
-    const before: Record<string, unknown> = {};
-    for (const key of Object.keys(properties)) before[key] = "<previous value>";
-    return { path, before, after: properties };
+  async execute(input) {
+    return viaBridgeOrMock("set_properties", input, () => {
+      const before: Record<string, unknown> = {};
+      for (const key of Object.keys(input.properties)) before[key] = "<previous value>";
+      return { path: input.path, before, after: input.properties };
+    });
   },
 });
 
 const delete_instance = tool({
   description: "Delete an instance. State what you're about to delete in your text before calling this.",
   inputSchema: z.object({ path: path() }),
-  async execute({ path }) {
-    return { path, deleted: true };
+  async execute(input) {
+    return viaBridgeOrMock("delete_instance", input, () => ({ path: input.path, deleted: true }));
   },
 });
 
 const execute_luau = tool({
   description: "Run an arbitrary Luau snippet in Studio's command bar context (for quick inspection, not persisted).",
   inputSchema: z.object({ code: z.string() }),
-  async execute({ code }) {
-    return { code, output: "-- executed (mock) --\nnil" };
+  async execute(input) {
+    return viaBridgeOrMock("execute_luau", input, () => ({
+      code: input.code,
+      output: "-- executed (mock, no plugin paired) --\nnil",
+    }));
   },
 });
 
@@ -140,8 +171,11 @@ const batch_execute = tool({
   inputSchema: z.object({
     operations: z.array(z.object({ type: z.string(), path: path() })),
   }),
-  async execute({ operations }) {
-    return { count: operations.length, paths: operations.map((o) => o.path) };
+  async execute(input) {
+    return viaBridgeOrMock("batch_execute", input, () => ({
+      count: input.operations.length,
+      paths: input.operations.map((o) => o.path),
+    }));
   },
 });
 
@@ -152,42 +186,56 @@ const batch_execute = tool({
 const playtest = tool({
   description: "Start or stop a Studio playtest session (Solo mode).",
   inputSchema: z.object({ action: z.enum(["start", "stop"]) }),
-  async execute({ action }) {
-    return {
-      action,
-      status: action === "start" ? "running" : "stopped",
-      console: action === "start" ? ["[Info] Playtest started", "[Info] 0 errors"] : [],
-    };
+  async execute(input) {
+    return viaBridgeOrMock("playtest", input, () => ({
+      action: input.action,
+      status: input.action === "start" ? "running" : "stopped",
+      console: input.action === "start" ? ["[Info] Playtest started (mock, no plugin paired)", "[Info] 0 errors"] : [],
+    }));
   },
 });
 
 const start_playtest = tool({
   description: "Start a Studio playtest session (Solo mode). Equivalent to playtest({action: 'start'}).",
   inputSchema: z.object({}),
-  async execute() {
-    return { status: "running", console: ["[Info] Playtest started", "[Info] 0 errors"] };
+  async execute(input) {
+    return viaBridgeOrMock("start_playtest", input, () => ({
+      status: "running",
+      console: ["[Info] Playtest started (mock, no plugin paired)", "[Info] 0 errors"],
+    }));
   },
 });
 
 const screenshot = tool({
   description: "Capture a screenshot of the current Studio viewport.",
   inputSchema: z.object({}),
-  async execute() {
-    return { capturedAt: new Date().toISOString(), note: "Screenshot capture requires a paired plugin." };
+  async execute(input) {
+    return viaBridgeOrMock("screenshot", input, () => ({
+      capturedAt: new Date().toISOString(),
+      note: "Screenshot capture requires a paired plugin.",
+    }));
   },
 });
 
 const capture_viewport = tool({
   description: "Capture the current 3D viewport for visual review.",
   inputSchema: z.object({}),
-  async execute() {
-    return { capturedAt: new Date().toISOString(), note: "Viewport capture requires a paired plugin." };
+  async execute(input) {
+    return viaBridgeOrMock("capture_viewport", input, () => ({
+      capturedAt: new Date().toISOString(),
+      note: "Viewport capture requires a paired plugin.",
+    }));
   },
 });
 
 // ---------------------------------------------------------------------------
 // Marketplace & asset tools
 // ---------------------------------------------------------------------------
+// Search/details hit Roblox's real public Catalog API directly (no plugin
+// needed — see lib/marketplace/catalog-client.ts). Import tools actually
+// place assets into the Studio session, so they always require the bridge;
+// audio search has no public REST equivalent (Roblox only exposes it via
+// AssetService:SearchAudioAsync inside Studio), so it's bridge-or-mock too.
 
 const search_marketplace = tool({
   description: "Search the Roblox Creator Store catalog for models, bundles, or other assets.",
@@ -196,10 +244,8 @@ const search_marketplace = tool({
     assetType: z.string().optional().describe("e.g. Model, Bundle, Gear"),
   }),
   async execute({ query, assetType }) {
-    return {
-      query,
-      results: mockCatalogResults(query, assetType ?? "Model"),
-    };
+    const results = await searchCatalog(query, assetType ?? "Model");
+    return { query, results };
   },
 });
 
@@ -207,77 +253,110 @@ const get_asset_details = tool({
   description: "Get details (name, creator, description) for a specific marketplace asset id.",
   inputSchema: z.object({ assetId: z.string() }),
   async execute({ assetId }) {
-    return { id: assetId, name: "Sample Asset", creator: "CommunityCreator", description: "A community-made asset." };
+    return getCatalogItemDetails(assetId);
   },
 });
 
 const import_asset = tool({
   description: "Import a marketplace model or bundle into the place. Confirm with the user before calling this.",
   inputSchema: z.object({ assetId: z.string(), name: z.string().optional() }),
-  async execute({ assetId, name }) {
-    return { id: assetId, name: name ?? `Asset_${assetId}`, imported: true };
+  async execute(input) {
+    return viaBridgeOrMock("import_asset", input, () => ({
+      id: input.assetId,
+      name: input.name ?? `Asset_${input.assetId}`,
+      imported: false,
+      note: "Import requires a paired plugin — this asset was located but not placed.",
+    }));
   },
 });
 
 const import_bundle = tool({
   description: "Import a marketplace bundle (multiple related assets) into the place.",
   inputSchema: z.object({ bundleId: z.string() }),
-  async execute({ bundleId }) {
-    return { id: bundleId, itemCount: 3, imported: true };
+  async execute(input) {
+    return viaBridgeOrMock("import_bundle", input, () => ({
+      id: input.bundleId,
+      itemCount: 0,
+      imported: false,
+      note: "Import requires a paired plugin.",
+    }));
   },
 });
 
 const search_audio = tool({
   description: "Search Roblox's audio catalog (AssetService:SearchAudioAsync) for sound effects or music.",
   inputSchema: z.object({ query: z.string() }),
-  async execute({ query }) {
-    return {
-      query,
-      results: [
-        { id: "9012345678", title: `${query} Hit 01`, artist: "SFX Library", duration: 1.4 },
-        { id: "9012345679", title: `${query} Hit 02`, artist: "SFX Library", duration: 2.1 },
-      ],
-    };
+  async execute(input) {
+    return viaBridgeOrMock("search_audio", input, () => ({
+      query: input.query,
+      results: mockSearchAudio(input.query),
+    }));
   },
 });
 
 const get_audio_metadata = tool({
   description: "Get title, artist, and duration for a specific audio asset id.",
   inputSchema: z.object({ assetId: z.string() }),
-  async execute({ assetId }) {
-    return { id: assetId, title: "Sample Sound", artist: "SFX Library", duration: 1.8 };
+  async execute(input) {
+    return viaBridgeOrMock("get_audio_metadata", input, () => ({
+      id: input.assetId,
+      title: "Sample Sound",
+      artist: "SFX Library",
+      duration: 1.8,
+    }));
   },
 });
 
 const import_sound = tool({
   description: "Import a sound asset as a Sound instance (SoundId = rbxassetid://<id>).",
   inputSchema: z.object({ assetId: z.string(), parent: path().optional() }),
-  async execute({ assetId, parent }) {
-    return { id: assetId, soundId: `rbxassetid://${assetId}`, parent: parent ?? "game/Workspace" };
+  async execute(input) {
+    return viaBridgeOrMock("import_sound", input, () => ({
+      id: input.assetId,
+      soundId: `rbxassetid://${input.assetId}`,
+      parent: input.parent ?? "game/Workspace",
+      imported: false,
+      note: "Import requires a paired plugin.",
+    }));
   },
 });
 
 const import_animation = tool({
   description: "Import an animation asset into the place.",
   inputSchema: z.object({ assetId: z.string() }),
-  async execute({ assetId }) {
-    return { id: assetId, animationId: `rbxassetid://${assetId}` };
+  async execute(input) {
+    return viaBridgeOrMock("import_animation", input, () => ({
+      id: input.assetId,
+      animationId: `rbxassetid://${input.assetId}`,
+      imported: false,
+      note: "Import requires a paired plugin.",
+    }));
   },
 });
 
 const import_mesh = tool({
   description: "Import a mesh asset into the place.",
   inputSchema: z.object({ assetId: z.string() }),
-  async execute({ assetId }) {
-    return { id: assetId, meshId: `rbxassetid://${assetId}` };
+  async execute(input) {
+    return viaBridgeOrMock("import_mesh", input, () => ({
+      id: input.assetId,
+      meshId: `rbxassetid://${input.assetId}`,
+      imported: false,
+      note: "Import requires a paired plugin.",
+    }));
   },
 });
 
 const import_image = tool({
   description: "Import an image/decal asset into the place.",
   inputSchema: z.object({ assetId: z.string() }),
-  async execute({ assetId }) {
-    return { id: assetId, imageId: `rbxassetid://${assetId}` };
+  async execute(input) {
+    return viaBridgeOrMock("import_image", input, () => ({
+      id: input.assetId,
+      imageId: `rbxassetid://${input.assetId}`,
+      imported: false,
+      note: "Import requires a paired plugin.",
+    }));
   },
 });
 
@@ -322,11 +401,3 @@ const MOCK_FILES: Record<string, string> = {
     "",
   ].join("\n"),
 };
-
-function mockCatalogResults(query: string, assetType: string) {
-  return [
-    { id: "7011234561", name: `${query} Pack A`, creator: "StudioForge", assetType },
-    { id: "7011234562", name: `${query} Pack B`, creator: "VoxelWorks", assetType },
-    { id: "7011234563", name: `${query} Deluxe`, creator: "PrismAssets", assetType },
-  ];
-}

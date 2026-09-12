@@ -14,6 +14,7 @@ import type { ChatUIMessage } from "@/lib/ai/trace";
 import type { PlanId } from "@/lib/tokens/pricing";
 import { estimateReserve, reserveTokens, releaseReservation, InsufficientTokensError } from "@/lib/tokens/reserve";
 import { reconcileUsage, computeUnits, type UsageCounts } from "@/lib/tokens/reconcile";
+import { requestContext } from "@/lib/ai/request-context";
 
 export const maxDuration = 60;
 
@@ -60,7 +61,7 @@ export async function POST(req: Request) {
 
   const stream = createUIMessageStream<ChatUIMessage>({
     originalMessages: messages,
-    execute: async ({ writer }) => {
+    execute: async ({ writer }) => requestContext.run({ userId: user.id }, async () => {
       let usage: UsageCounts;
 
       if (hasAnthropicKey()) {
@@ -102,7 +103,7 @@ export async function POST(req: Request) {
         type: "data-tokenUsage",
         data: { balance, reserved: reservedUnits, used: computeUnits(usage), model: modelLabel },
       });
-    },
+    }),
     onError: (error) => {
       console.error("[chat] stream error", error);
       return "Something went wrong while generating a response.";
