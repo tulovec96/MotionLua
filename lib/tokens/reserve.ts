@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db/prisma";
 import { MIN_RESERVE } from "@/lib/tokens/pricing";
+import { maybeResetCycle } from "@/lib/tokens/cycle";
 
 export class InsufficientTokensError extends Error {
   constructor() {
@@ -14,17 +15,16 @@ export function estimateReserve(): number {
 }
 
 /**
- * Atomically decrements tokenBalance, guarded by the balance check in the
- * same statement (`UPDATE ... WHERE tokenBalance >= amount`) — a single SQL
- * statement is inherently race-safe per row without needing an explicit
- * transaction or row lock.
- *
- * Monthly cycle reset/rollover (lib/tokens/cycle.ts) is layered on top of
- * this in a later phase; for now tokenBalance is the sole source of truth,
- * which is correct as long as a user's balance starts at their monthly
- * allocation (see the User model default and prisma/seed.ts).
+ * Runs the lazy monthly-cycle check, then atomically decrements
+ * tokenBalance, guarded by the balance check in the same statement
+ * (`UPDATE ... WHERE tokenBalance >= amount`) — a single SQL statement is
+ * inherently race-safe per row without needing an explicit transaction or
+ * row lock.
  */
 export async function reserveTokens(userId: string, amount: number): Promise<void> {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  await maybeResetCycle(user);
+
   const result = await prisma.user.updateMany({
     where: { id: userId, tokenBalance: { gte: amount } },
     data: { tokenBalance: { decrement: amount } },
