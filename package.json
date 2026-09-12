@@ -15,6 +15,9 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.53",
+    "@ai-sdk/provider": "^4.0.14",
+    "@ai-sdk/provider-utils": "^5.0.40",
+    "@ai-sdk/react": "^4.0.102",
     "@auth/prisma-adapter": "^2.11.3",
     "@base-ui/react": "^1.8.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
